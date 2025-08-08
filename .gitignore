@@ -41,3 +41,5 @@ logs/
 # Temp files
 *.tmp
 *.temp
+
+claude-loop/putYourProjectHere/

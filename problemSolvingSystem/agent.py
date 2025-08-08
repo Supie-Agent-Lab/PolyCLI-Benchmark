@@ -44,7 +44,7 @@ def agent_loop(max_rounds=20):
     
     # Step 1: Initial implementation
     print("\n👨‍💻 Coder starting implementation...")
-    result = worker.run("基于task.md的需求，开始实现这个刷题系统。先创建README。")
+    result = worker.run("基于task.md的需求，开始实现这个刷题系统。先创建README。注意包括 README 的所有项目文件都应该放在 putYourPojectHere 子文件下.")
     print(result.content)
     
     for round in range(max_rounds):
