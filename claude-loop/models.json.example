@@ -1,0 +1,19 @@
+{
+  "models": {
+    "glm-4.5": {
+      "endpoint": "https://api.z.ai/api/paas/v4",
+      "api_key": "YOUR_GLM_API_KEY_HERE",
+      "model": "glm-4.5"
+    },
+    "gpt-4o": {
+      "endpoint": "https://api.openai.com/v1",
+      "api_key": "YOUR_OPENAI_API_KEY_HERE",
+      "model": "gpt-4o"
+    },
+    "grok-4": {
+      "endpoint": "https://openrouter.ai/api/v1",
+      "api_key": "YOUR_OPENROUTER_API_KEY_HERE",
+      "model": "x-ai/grok-4"
+    }
+  }
+}
