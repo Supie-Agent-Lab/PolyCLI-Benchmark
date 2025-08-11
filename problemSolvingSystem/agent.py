@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 from polycli.agent import OpenSourceAgent
+from pydantic import BaseModel, Field
+from typing import List, Optional
 import sys
+
+# Pydantic model for structured review output
+class ReviewResult(BaseModel):
+    """Structured review result to prevent accidental LGTM"""
+    is_complete: bool = Field(description="是否所有需求都已完美完成并经过充分测试")
+    completion_percentage: int = Field(description="完成度百分比（0-100）", ge=0, le=100)
+    issues: List[str] = Field(description="存在的问题列表，如果没有问题则为空列表")
+    next_steps: List[str] = Field(description="下一步需要实现的功能列表")
+    critical_issues: Optional[str] = Field(description="关键问题（如果有）", default=None)
+    
+    def should_continue(self) -> bool:
+        """判断是否应该继续开发"""
+        return not self.is_complete or self.completion_percentage < 95
 
 # System prompt from general_prompt.md
 SYSTEM_PROMPT = """#角色属性
@@ -35,7 +50,7 @@ SYSTEM_PROMPT = """#角色属性
 
 def agent_loop(max_rounds=20):
     """Multi-agent loop: Read task.md -> Coder -> Reviewer (Grok-4) -> Refiner"""
-    worker = OpenSourceAgent(system_prompt=SYSTEM_PROMPT)
+    worker = OpenSourceAgent(system_prompt=SYSTEM_PROMPT, debug=True)
     
     # Step 0: Read requirements from task.md
     print("📖 Reading requirements from task.md...")
@@ -50,29 +65,143 @@ def agent_loop(max_rounds=20):
     for round in range(max_rounds):
         print(f"\n🔄 Round {round + 1}/{max_rounds}")
         
+        # Debug: Save messages to JSON file
+        import json
+        from pathlib import Path
+        debug_dir = Path("debug_messages")
+        debug_dir.mkdir(exist_ok=True)
+        
+        # Save messages before running
+        messages_file = debug_dir / f"round_{round+1:02d}_before.json"
+        with open(messages_file, 'w', encoding='utf-8') as f:
+            json.dump(worker.messages, f, indent=2, ensure_ascii=False)
+        print(f"💾 Saved messages to {messages_file}")
+        
+        # Debug: Print ALL messages
+        print(f"\n📝 Total messages: {len(worker.messages)}")
+        print("=" * 50)
+        for i, msg in enumerate(worker.messages):
+            role = msg.get('role', 'unknown')
+            # Handle different message formats
+            if 'parts' in msg:
+                # Qwen format
+                parts = msg.get('parts', [])
+                if parts and isinstance(parts[0], dict):
+                    content = str(parts[0].get('text', 'no text'))[:200]
+                else:
+                    content = str(parts)[:200]
+            else:
+                # Simple format
+                content = str(msg.get('content', 'no content'))[:200]
+            print(f"[{i}] {role}: {content}...")
+        print("=" * 50)
+        
         # Continue building
         print("🏗️ Building system...")
         result = worker.run("继续构建系统, 增加下一个小功能点. 不要一次做太多, 及时停下来.")
         print(result.content)
         
+        # Save messages after running
+        messages_file_after = debug_dir / f"round_{round+1:02d}_after.json"
+        with open(messages_file_after, 'w', encoding='utf-8') as f:
+            json.dump(worker.messages, f, indent=2, ensure_ascii=False)
+        print(f"💾 Saved messages after to {messages_file_after}")
+        
+        # Also save the raw result
+        result_file = debug_dir / f"round_{round+1:02d}_result.json"
+        with open(result_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                "content": result.content,
+                "is_success": result.is_success,
+                "raw_result": result.raw_result,
+                "error_message": result.error_message
+            }, f, indent=2, ensure_ascii=False)
+        print(f"💾 Saved result to {result_file}")
+        
         # Review with Grok-4 every 2 rounds
         if round % 2 == 1:
-            print("👀 Reviewer (Grok-4) checking...")
+            print("👀 Reviewer (glm-4.5) checking with structured output...")
             review = worker.run(
-                "严格审查当前的实现进度和代码质量。是否符合task.md的需求？如果确认**所有需求完美完成并经过充分测试**，说'LGTM'。否则指出存在问题, 或下一步需要实现的功能. 警告: 除非整个工程已经完成, 永远不要提早说出 LGTM。",
-                model="grok-4",
-                system_prompt="你是一个严格的代码审查员，确保实现符合task.md的需求。"
+                """严格审查当前的实现进度和代码质量，对照task.md的需求。
+                请仔细评估：
+                1. 所有功能是否都已实现？
+                2. 代码质量如何？
+                3. 是否有测试？
+                4. 还有哪些需要完成的工作？
+                
+                警告: 只有当整个工程100%完成时，is_complete才能为true。""",
+                model="glm-4.5",
+                system_prompt="你是一个严格的代码审查员，确保实现符合task.md的需求。",
+                cli="no-tools",  # Use no-tools mode for structured output
+                schema_cls=ReviewResult
             )
             
-            print(review.content)
-            if review and "LGTM" in review.content:
-                print("✅ System approved by reviewer!")
-                break
+            # Debug: Save review result and messages
+            review_result_file = debug_dir / f"round_{round+1:02d}_review_result.json"
+            with open(review_result_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "content": review.content if review else None,
+                    "is_success": review.is_success if review else False,
+                    "raw_result": review.raw_result if review else None,
+                    "has_data": review.has_data() if review else False,
+                    "data": review.data if review and review.data else None
+                }, f, indent=2, ensure_ascii=False)
+            print(f"💾 Saved review result to {review_result_file}")
+            
+            # Save messages after review
+            messages_file_after_review = debug_dir / f"round_{round+1:02d}_after_review.json"
+            with open(messages_file_after_review, 'w', encoding='utf-8') as f:
+                json.dump(worker.messages, f, indent=2, ensure_ascii=False)
+            print(f"💾 Saved messages after review to {messages_file_after_review}")
+            
+            # Debug: Print messages after review
+            print(f"\n📝 After review - Total messages: {len(worker.messages)}")
+            if len(worker.messages) > 0:
+                last_msg = worker.messages[-1]
+                role = last_msg.get('role', 'unknown')
+                if 'parts' in last_msg:
+                    parts = last_msg.get('parts', [])
+                    if parts and isinstance(parts[0], dict):
+                        content = str(parts[0].get('text', 'no text'))[:300]
+                    else:
+                        content = str(parts)[:300]
+                else:
+                    content = str(last_msg.get('content', 'no content'))[:300]
+                print(f"Last message - {role}: {content}...")
+            
+            review_data = None
+            if review and review.data:
+                review_data = ReviewResult(**review.data)
+                print(f"📊 完成度: {review_data.completion_percentage}%")
+                print(f"✅ 是否完成: {review_data.is_complete}")
+                if review_data.issues:
+                    print(f"❌ 问题: {', '.join(review_data.issues[:3])}")
+                if review_data.next_steps:
+                    print(f"📝 下一步: {', '.join(review_data.next_steps[:3])}")
+                
+                if review_data.is_complete and review_data.completion_percentage >= 95:
+                    print("✅ System approved by reviewer! All requirements completed!")
+                    break
+            else:
+                print("⚠️ Failed to get structured review result")
+                continue
             
             # Refine based on feedback
-            print("🔧 Refining based on review...")
-            result = worker.run("根据审查反馈，改进和完善相应部分。不必一次做完. ")
-            print(result.content)
+            if review_data and review_data.should_continue():
+                print("🔧 Refining based on review...")
+                
+                # Build specific refine prompt based on review data
+                refine_prompt = "根据审查反馈，需要改进以下方面：\n"
+                if review_data.critical_issues:
+                    refine_prompt += f"关键问题：{review_data.critical_issues}\n"
+                if review_data.issues:
+                    refine_prompt += f"问题：{', '.join(review_data.issues[:3])}\n"
+                if review_data.next_steps:
+                    refine_prompt += f"下一步：{review_data.next_steps[0]}\n"
+                refine_prompt += "请处理最重要的问题，不必一次做完。"
+                
+                refine_result = worker.run(refine_prompt)
+                print(refine_result.content if refine_result else "No refine result!")
     
     # Final summary
     print("\n" + "="*50)
