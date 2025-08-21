@@ -3,7 +3,7 @@
 Information Edge - Finding the rare gems that matter (with session tracking)
 """
 
-from polycli import OpenSourceAgent
+from polycli import PolyAgent
 from polycli.orchestration import session, serve_session, pattern
 from polycli.builtin_patterns import notify
 from pathlib import Path
@@ -26,15 +26,15 @@ REFINER_PROMPT = """You are a brutal information critic.
 
 Look at what we've collected and be harsh:
 - Is this ACTUALLY rare or just seems rare?
-- Will this matter in 6 months?
 - Does this change any decisions?
 - Is this signal or noise?
+- Is this too broad and too generic?
 
 Delete the noise. Keep only diamonds.
 Then think: what question would lead us to even rarer information?"""
 
 @pattern
-def hunt_for_edge(hunter: OpenSourceAgent, topic: str, edge_file_path: Path, round_num: int) -> str:
+def hunt_for_edge(hunter: PolyAgent, topic: str, edge_file_path: Path, round_num: int) -> str:
     """Hunt for one piece of rare information"""
     current_edge = edge_file_path.read_text() if edge_file_path.exists() else "Empty"
     
@@ -53,11 +53,11 @@ After finding it, append it to the file at: {edge_file_path}
 Format: ## Round {round_num}
 [your rare finding]"""
     
-    result = hunter.run(prompt)
+    result = hunter.run(prompt, cli="claude-code")
     return result.content if result else ""
 
 @pattern
-def refine_and_redirect(refiner: OpenSourceAgent, edge_file_path: Path) -> str:
+def refine_and_redirect(refiner: PolyAgent, edge_file_path: Path) -> str:
     """Refine the collected information and suggest new directions"""
     current_content = edge_file_path.read_text() if edge_file_path.exists() else "Empty"
     
@@ -78,8 +78,8 @@ def edge_loop_with_session(topic: str, max_rounds: int = 10):
     """Information edge loop with session tracking"""
     
     # Create agents
-    hunter = OpenSourceAgent(id="Hunter", system_prompt=HUNTER_PROMPT)
-    refiner = OpenSourceAgent(id="Refiner", system_prompt=REFINER_PROMPT)
+    hunter = PolyAgent(id="Hunter", system_prompt=HUNTER_PROMPT, debug=True)
+    refiner = PolyAgent(id="Refiner", system_prompt=REFINER_PROMPT, debug=True)
     
     # Setup output
     output_dir = Path(f"/home/jeffry/Codebase/PolyCLI-Benchmark/usefulLoops/edge_{topic.replace(' ', '_')}")
@@ -94,8 +94,8 @@ def edge_loop_with_session(topic: str, max_rounds: int = 10):
         
         # Initialize edge file
         edge_file.write_text(f"# Information Edge: {topic}\n\n")
-        notify(hunter, f"Starting hunt for information edge on: {topic}")
-        notify(refiner, f"You'll be refining information about: {topic}")
+        # notify(hunter, f"Starting hunt for information edge on: {topic}")
+        # notify(refiner, f"You'll be refining information about: {topic}")
         
         for round_num in range(1, max_rounds + 1):
             print(f"\n───── Round {round_num} ─────")
