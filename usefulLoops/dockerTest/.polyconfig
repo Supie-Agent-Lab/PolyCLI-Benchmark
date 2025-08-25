@@ -1,0 +1,4 @@
+# PolyCLI Sandbox Configuration
+entry: workflow/main.py
+ports: 8765:8765,8766:8766
+# cache: true  # Cache enabled by default, set to false to disable
