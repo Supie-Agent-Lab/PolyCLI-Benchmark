@@ -213,153 +213,76 @@ else:
 
 **Cursor**
 
-### 任务1（P0）修复错误的异步用法：create_task 传了 tuple
-- 问题
-  - 在 `WebSocketServer.register_device_handler` 的测试模式延时快照里，误把协程放进了 tuple，实际没有等待 sleep。
-  - 位置：
-```460:463:backend/core/websocket_server.py
-asyncio.create_task((asyncio.sleep(delay_ms/1000.0),))
-asyncio.create_task(_send_snapshot())
-```
-- 方案
-  - 写一个小协程统一处理延时和发送：
-    - `async def _delayed_snapshot(): await asyncio.sleep(delay); await _send_snapshot()`
-    - 然后 `asyncio.create_task(_delayed_snapshot())`
-- 验收
-  - 在 `workflow.test_mode=true` 且配置了 `snapshot_on_register_delay_ms` 时，确实延迟后只发一次快照，无异常日志。
+### 编辑内容84（P0 修复：延时快照调度/事件循环绑定/统一发送封装/心跳单点化）
+
+#### 编辑人
+- w
+
+#### 新增/修改内容
+- 修复延时快照异步调度（任务1）
+  - 文件：`backend/core/websocket_server.py`
+  - 变更：将 `asyncio.create_task((asyncio.sleep(...),))` 错误用法改为 `_delayed_snapshot()` 协程，先 `await asyncio.sleep()`，再调用 `_send_snapshot()`，确保测试模式下快照按延迟仅发送一次。
+
+- 事件循环绑定到连接协程（任务2）
+  - 文件：`backend/core/connection.py`
+  - 变更：在 `handle_connection()` 入口用 `asyncio.get_running_loop()` 绑定 `self.loop`，替代构造期 `get_event_loop()`，避免无运行循环或跨循环导致的调度问题。
+
+- 统一消息发送封装（任务3）
+  - 文件：`backend/core/connection.py`, `backend/core/websocket_server.py`
+  - 变更：新增 `ConnectionHandler.send_json()/send_text()`，集中处理 `send_json` 缺失时的字符串回退；将 `websocket_server` 中补投、快照、统计广播等调用切换为 `handler.send_json()`，减少 try/except 样板与分散逻辑。
+
+- 心跳处理单点化（任务4）
+  - 文件：`backend/core/handle/textHandle.py`
+  - 变更：移除 `handleTextMessage` 内对 `ping/keepalive` 的重复处理，保留 `ConnectionHandler._route_message` 里的心跳拦截与 `pong` 回执，避免路径重复。
+
+#### 验收要点
+- 测试模式下 `snapshot_on_register_delay_ms` 生效：延时后仅推送一次快照，无异常日志。
+- 多线程回调使用 `run_coroutine_threadsafe(..., self.loop)` 正常，未再出现 “no running event loop”。
+- 消息发送统一通过 `send_json()`，外部协议不变；`broadcast_server_stats/离线补投/工作流快照` 均可正常到达。
+- 心跳仅经 `_route_message` 路径处理，仍快速回 `pong`，日志无重复。
+
+#### 影响范围与回滚
+- 影响 `websocket_server/connection/textHandle`；协议与默认行为保持不变。
+- 回滚：
+  - 将 `_delayed_snapshot()` 恢复为原始两行（不推荐）；
+  - 在构造函数恢复 `get_event_loop()`（不推荐）；
+  - 将 `send_json()` 调用点还原为直接 `websocket.send_json/ send`；
+  - 在 `textHandle` 重新加入心跳分支（不推荐）。
 
 
-### 任务2（P0）修复事件循环获取时机
-- 问题
-  - 在构造函数里用 `asyncio.get_event_loop()`，在现代 asyncio 运行模型下不可靠（无运行循环时会取到错误 loop）。
-  - 位置：
-```90:96:backend/core/connection.py
-self.loop = asyncio.get_event_loop()
-```
-- 方案
-  - 在 `handle_connection()` 开始处用 `asyncio.get_running_loop()` 赋值给 `self.loop`。
-  - 其他线程用 `run_coroutine_threadsafe(..., self.loop)` 保持不变。
-- 验收
-  - 连接/断开/ASR 线程调度稳定，无 “no running event loop” 或跨循环异常。
 
 
-### 任务3（P0）统一发送通道：Transport 封装
-- 问题
-  - 全代码到处出现“尝试 `send_json`；失败回退 `send(json.dumps(...))`”的重复样板，容易漏改、难追踪。
-- 方案
-  - 在 `ConnectionHandler` 增加：
-    - `async def send_json(self, payload: dict) -> None`
-    - `async def send_text(self, text: str) -> None`
-    - `async def send_envelope(self, type: str, **fields) -> None`（可选）
-  - 内部统一处理 `send_json` 是否存在与回退、错误日志节流。
-  - 替换所有直接 `handler.websocket.send_json` / `send(json.dumps(...))` 调用。
-- 验收
-  - 代码库不再出现对 `websocket.send_json` 的直接调用；消息发送路径集中在 1-2 个函数里。
 
 
-### 任务4（P0）心跳处理单点化
-- 问题
-  - `ping/keepalive` 在两处处理，冗余且容易跑偏：
-```576:590:backend/core/connection.py   # _route_message 已处理
-501:508:backend/core/handle/textHandle.py  # 再次处理
-```
-- 方案
-  - 仅保留 `_route_message` 的心跳分支；从 `handleTextMessage` 移除对应逻辑。
-- 验收
-  - 收到心跳只走一条路径；依然回复 `{"type":"pong"}`；日志不重复。
 
 
-### 任务5（P1）握手/ID 解析封装 + 单元测试
-- 问题
-  - 解析 `device-id/client-id` 的逻辑分散在 `WebSocketServer._http_response` 和 `ConnectionHandler.handle_connection`，含大量“反射式”访问不同 websockets 版本属性，重复且脆弱。
-- 方案
-  - 抽出 `parse_ids_from_handshake(ws, path) -> (device_id, client_id, raw_path)`，统一容错/标准化（去引号、lowercase、空串处理），并维护 `_handshake_cache`。
-  - 两处统一调用该函数；保留“缺失则自动分配 ID”的兼容策略。
-- 验收
-  - 针对多种 `path/request_uri/raw_path` 组合的单测通过；功能不变，日志一致或更清晰。
 
 
-### 任务6（P1）拆小巨型路由：`handleTextMessage` 模块化
-- 问题
-  - `handleTextMessage` >500 行，职责过载（hello/abort/listen/mode/meeting/coding/workflow/mcp/iot/peer/server/直达命令）。
-- 方案
-  - 采用“路由表”：
-    - `HANDLERS = {"hello": handle_hello, "abort": handle_abort, ...}`
-    - 每个 handler 函数保持短小、单一职责，禁止深层嵌套。
-  - 复用任务3的 `send_json` 封装，去掉各分支里的发送样板。
-- 验收
-  - `handleTextMessage` <100 行；新增 handler 仅需注册表 + 独立函数；现有用例不变。
 
 
-### 任务7（P1）ASR 分段改为有限状态机（消除补丁式分支）
-- 问题
-  - 设备 `listen start/stop` 与服务端 VAD 回退混杂在多处 if/else；还有临时状态 `just_woken_up` 等补丁，复杂且易错。
-- 方案
-  - 在 `ConnectionHandler` 引入 `listen_state` 有限状态机：`Idle -> Listening -> Finalizing -> Idle`。
-  - 规则：
-    - 设备 `listen` 事件只改变状态并记录 `_last_listen_event_ms`；VAD 仅在“超过 fallback_ms 未见设备边界”时兜底。
-    - `receive_audio()` 在 `Listening` 累积，在 `Finalizing` 触发一次 `handle_voice_stop`。
-    - 移除分散的 `have_voice` 特判和 `just_woken_up` 补丁。
-- 验收
-  - 分段产生稳定；短语边界一致性提升；删除多余 if/else 后功能不回退。
 
 
-### 任务8（P1）统一 LLM 实例工厂与共享注册表
-- 问题
-  - `WebSocketServer.get_or_create_llm` 已有共享注册表；`ConnectionHandler.get_llm_for` 仍保留一套“合并 overrides + create_instance”的重复逻辑。
-- 方案
-  - `get_llm_for` 始终委托给 server 的共享工厂（传 `alias+overrides` 指纹）；仅在“无命中”时回退 `self.llm`。
-  - 清理本地实例化分支，避免配置热更与缓存不一致。
-- 验收
-  - 日志中只出现一次实例化；配置热更后用途 LLM 缓存清理生效；行为与现有完全一致。
 
 
-### 任务9（P2）双通道过渡（重复连接）回归保护与测试
-- 问题
-  - 旧连接 1.5 秒后关闭的过渡逻辑合理，但缺少回归测试覆盖，未来容易出现“卡死/提前中断”。
-- 方案
-  - 补充集成测试：同一 `device-id` 并发连接，新连接建立、旧连接收到提示后延迟关闭；不中断正在进行的 ASR/推送。
-- 验收
-  - 测试稳定通过；无额外代码变更（除测试）。
 
 
-### 任务10（P2）消息发送与错误处理标准化
-- 问题
-  - 发送路径处处 try/except，策略不一致（有的吞异常，有的打印全栈）。
-- 方案
-  - 在任务3的封装里统一：错误分级日志（warn/err），对“可预计的网络异常”静默/降噪；永不抛出导致整个连接中止。
-- 验收
-  - 发送错误只在封装处出现；调用点零 try/except；异常统计更可读。
 
 
-### 任务11（P2）协议/行为不破坏的约束校验
-- 目标
-  - 保持“Never break userspace”：事件名/字段/默认行为（例如工作模式默认抑制 TTS）完全不变。
-- 方案
-  - 增加契约测试：对 `meeting/coding/workflow/peer/server/mode/listen/tts/stt` 的 envelope 结构做快照校验；任何改动需显式更新快照。
-- 验收
-  - 契约测试通过；外部客户端无需改动即可跑通。
 
 
-优先级汇总（高→低）
-- P0: 任务1/2/3/4
-- P1: 任务5/6/7/8
-- P2: 任务9/10/11
 
-如果要我直接开工，我会按上述顺序先落地 P0 四项，整个过程不改变对外协议与默认行为。
 
-```python
-asyncio.create_task((asyncio.sleep(delay_ms/1000.0),))
-asyncio.create_task(_send_snapshot())
-```
 
-```python
-self.loop = asyncio.get_event_loop()
-```
 
-```plaintext
-501:508:backend/core/handle/textHandle.py  # 再次处理
-```
+
+
+
+
+
+
+
+
+
 
 ---
 

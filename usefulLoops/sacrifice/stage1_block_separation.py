@@ -52,43 +52,44 @@ def main():
         print("No files found in workspace/raw/")
         return
     
-    filepath = files[0]
-    print(f"Processing {filepath.name}...")
     
     with session() as s:
         server, _ = serve_session(s, port=8765)
         print(f"Monitor at http://localhost:8765")
         
-        agent = PolyAgent(id=f"splitter_{filepath.stem}")
-        
-        max_attempts = 10
-        for attempt in range(1, max_attempts + 1):
-            result = split_file(agent, str(filepath), str(blocks_dir), attempt)
-            print(f"  Attempt {attempt}: {result}")
+        for _ in range(len(files)):
+            filepath = files[_]
+            print(f"Processing {filepath.name}...")
             
-            block_count = len(list((blocks_dir / filepath.stem).glob("*.md"))) if (blocks_dir / filepath.stem).exists() else 0
-            
-            if 5 <= block_count <= 10:
-                original_size = filepath.stat().st_size
-                total_block_size = sum(f.stat().st_size for f in (blocks_dir / filepath.stem).glob("*.md"))
+            agent = PolyAgent(id=f"splitter_{filepath.stem}")
+            max_attempts = 5
+            for attempt in range(1, max_attempts + 1):
+                result = split_file(agent, str(filepath), str(blocks_dir), attempt)
+                print(f"  Attempt {attempt}: {result}")
                 
-                if total_block_size >= original_size * 0.5:
-                    print(f"  Success: {block_count} blocks, {total_block_size}/{original_size} bytes")
-                    break
+                block_count = len(list((blocks_dir / filepath.stem).glob("*.md"))) if (blocks_dir / filepath.stem).exists() else 0
+                
+                if 5 <= block_count <= 10:
+                    original_size = filepath.stat().st_size
+                    total_block_size = sum(f.stat().st_size for f in (blocks_dir / filepath.stem).glob("*.md"))
+                    
+                    if total_block_size >= original_size * 0.5:
+                        print(f"  Success: {block_count} blocks, {total_block_size}/{original_size} bytes")
+                        break
+                    else:
+                        failure_msg = f"Size check failed: {total_block_size} bytes < {original_size * 0.5} bytes (50% of original). Please create larger blocks."
+                        print(f"  {failure_msg}")
+                        notify(agent, failure_msg)
                 else:
-                    failure_msg = f"Size check failed: {total_block_size} bytes < {original_size * 0.5} bytes (50% of original). Please create larger blocks."
+                    failure_msg = f"Block count check failed: got {block_count} blocks, need between 5 and 10. Please adjust the number of blocks."
                     print(f"  {failure_msg}")
                     notify(agent, failure_msg)
-            else:
-                failure_msg = f"Block count check failed: got {block_count} blocks, need between 5 and 10. Please adjust the number of blocks."
-                print(f"  {failure_msg}")
-                notify(agent, failure_msg)
+                
+                if attempt == max_attempts:
+                    print(f"  Failed after {max_attempts} attempts")
             
-            if attempt == max_attempts:
-                print(f"  Failed after {max_attempts} attempts")
-        
-        print("\n\nBlock separation complete. Check http://localhost:8765 for details")
-        input("Press Enter to stop...")
+            print("\n\nBlock separation complete. Check http://localhost:8765 for details")
+            input("Press Enter to stop...")
 
 if __name__ == "__main__":
     main()
